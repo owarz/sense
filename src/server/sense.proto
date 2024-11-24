@@ -1,0 +1,22 @@
+syntax = "proto2";
+
+package hello;
+
+message SenseMessage {
+    required uint32 version = 1;
+    required uint64 timestamp = 2;
+    required bytes payload = 3;
+}
+
+message TimeSyncRequest {
+    required uint32 version = 1;
+    required uint64 timestamp = 2;
+    required bytes nonce = 3;
+}
+
+message TimeSyncResponse {
+    required uint32 version = 1;
+    required uint64 timestamp = 2;
+    required bytes nonce = 3;
+    required uint64 server_timestamp = 4;
+}

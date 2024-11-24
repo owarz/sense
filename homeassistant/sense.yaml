@@ -1,0 +1,40 @@
+sensor:
+  - platform: rest
+    name: Sense Room Temperature
+    resource: http://172.17.0.2/v1/room/current
+    value_template: "{{ value_json.temperature }}"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    scan_interval: 60
+
+  - platform: rest
+    name: Sense Room Humidity
+    resource: http://172.17.0.2/v1/room/current
+    value_template: "{{ value_json.humidity }}"
+    unit_of_measurement: "%"
+    device_class: humidity
+    scan_interval: 60
+
+  - platform: rest
+    name: Sense Room Light Level
+    resource: http://172.17.0.2/v1/room/current
+    value_template: "{{ value_json.light }}"
+    unit_of_measurement: "lux"
+    device_class: illuminance
+    scan_interval: 60
+
+  - platform: rest
+    name: Sense Room Sound Level
+    resource: http://172.17.0.2/v1/room/current
+    value_template: "{{ value_json.sound }}"
+    unit_of_measurement: "dB"
+    device_class: sound_pressure
+    scan_interval: 60
+
+  - platform: rest
+    name: Sense Room Air Quality
+    resource: http://172.17.0.2/v1/room/current
+    value_template: "{{ value_json.particulates }}"
+    unit_of_measurement: "µg/m³"
+    device_class: pm25
+    scan_interval: 60

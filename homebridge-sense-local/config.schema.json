@@ -1,0 +1,34 @@
+{
+  "pluginAlias": "SenseLocal",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "required": true,
+        "default": "Sense Device"
+      },
+      "email": {
+        "title": "Email",
+        "type": "string",
+        "required": true
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "required": true
+      },
+      "updateInterval": {
+        "title": "Update Interval",
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 3600,
+        "default": 60,
+        "description": "How often to update sensor values (in seconds)"
+      }
+    }
+  }
+}

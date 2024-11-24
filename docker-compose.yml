@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  sense-api:
+    build: .
+    container_name: sense-api
+    ports:
+      - "80:80"
+    networks:
+      - sense_network
+
+networks:
+  sense_network:
+    name: sense_network
