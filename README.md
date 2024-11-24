@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # Sense Local Server & HomeKit Integration
 
 This project provides a local server replacement for the Sense sleep tracking device, enabling continued functionality through HomeKit integration via Homebridge.
@@ -32,7 +32,7 @@ npm install -g homebridge-sense-local
 4. Configure your DNS server to redirect Sense API requests to the local server:
    - hello-sense.com -> localhost:3000
    - api.hello.is -> localhost:3000
-
+   - time.hello.is -> localhost:3000
 ## Configuration
 
 Add this to your Homebridge configuration:
@@ -41,9 +41,11 @@ Add this to your Homebridge configuration:
 {
     "platforms": [
         {
-            "platform": "SenseLocal",
-            "name": "Sense Sleep",
-            "server_address": "http://localhost:3000"
+            "name": "Sense Device",
+            "email": "demo@example.com",
+            "password": "demo123",
+            "updateInterval": 10,
+            "platform": "SenseLocal"
         }
     ]
 }
@@ -71,11 +73,3 @@ npm run server
 
 - `src/server`: Local API server implementation
 - `homebridge`: Homebridge plugin
-
-## License
-
-MIT
-=======
-# sense
-hello sense sleep tracker local api server and homebridge plugin.
->>>>>>> 8ce97691befd877982c7e4812c68eb60a6bbb702
