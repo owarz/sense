@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Sense Local Server & HomeKit Integration
 
 This project provides a local server replacement for the Sense sleep tracking device, enabling continued functionality through HomeKit integration via Homebridge.
@@ -74,3 +75,7 @@ npm run server
 ## License
 
 MIT
+=======
+# sense
+hello sense sleep tracker local api server and homebridge plugin.
+>>>>>>> 8ce97691befd877982c7e4812c68eb60a6bbb702
