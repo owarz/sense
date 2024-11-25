@@ -1,22 +1,82 @@
 syntax = "proto2";
 
-package hello;
+package sense;
 
 message SenseMessage {
-    required uint32 version = 1;
-    required uint64 timestamp = 2;
-    required bytes payload = 3;
+  required uint32 version = 1;
+  required uint64 timestamp = 2;
+  required bytes payload = 3;
+  optional bytes signature = 4;
+  optional SensorData sensor_data = 5;
 }
 
-message TimeSyncRequest {
-    required uint32 version = 1;
-    required uint64 timestamp = 2;
-    required bytes nonce = 3;
+message SensorData {
+  message Reading {
+    required uint32 raw_value = 1;
+    optional float calibrated_value = 2;
+    optional uint32 status = 3;
+    optional string unit = 4;
+    optional string condition = 5;
+  }
+
+  optional Reading temperature = 1;  // Celsius
+  optional Reading humidity = 2;     // Percentage
+  optional Reading light = 3;        // Lux
+  optional Reading sound = 4;        // dB
+  optional Reading air_quality = 5;  // VOC level
+  optional Reading particulates = 6; // μg/m³
+  optional uint64 timestamp = 7;     // Unix epoch milliseconds
+  optional uint32 sequence = 8;      // Message sequence number
+  optional uint32 flags = 9;         // Status flags
+  optional string device_id = 10;    // Sense device ID
 }
 
-message TimeSyncResponse {
-    required uint32 version = 1;
-    required uint64 timestamp = 2;
-    required bytes nonce = 3;
-    required uint64 server_timestamp = 4;
+// Periyodik sensör verisi
+message PeriodicData {
+  optional uint32 unix_time = 1;
+  optional uint32 temperature = 2;  // Celsius * 100
+  optional uint32 humidity = 3;     // Percentage * 100
+  optional uint32 light = 4;        // Lux
+  optional uint32 dust = 5;         // μg/m³
+  optional uint32 light_variability = 6;
+  optional uint32 dust_max = 7;
+  optional uint32 dust_min = 8;
+}
+
+// Toplu periyodik veri
+message BatchedPeriodicData {
+  repeated PeriodicData data = 1;
+  required string device_id = 2;
+  required uint32 firmware_version = 3;
+  optional uint32 uptime_in_second = 4;
+  optional string connected_ssid = 5;
+}
+
+// Cihaz yönetimi
+message Device {
+  required string id = 1;
+  optional string name = 2;
+  optional string firmware_version = 3;
+  optional string wifi_ssid = 4;
+  optional uint32 last_seen = 5;  // Unix timestamp
+  optional DeviceStatus status = 6;
+}
+
+enum DeviceStatus {
+  UNKNOWN = 0;
+  ONLINE = 1;
+  OFFLINE = 2;
+  UPDATING = 3;
+}
+
+// Cihaz eşleştirme
+message PairingRequest {
+  required string device_id = 1;
+  optional string wifi_ssid = 2;
+}
+
+message PairingResponse {
+  required bool success = 1;
+  optional string error_message = 2;
+  optional Device device = 3;
 }

@@ -24,6 +24,13 @@ const logger = winston.createLogger({
 const app = express();
 const port = 80;
 
+// API routes
+const sensorsRouter = require('./routes/v2/sensors');
+const devicesRouter = require('./routes/v2/devices');
+
+app.use('/v2/sensors', sensorsRouter);
+app.use('/v2/devices', devicesRouter);
+
 // Sense API configuration
 const SENSE_API_URL = 'https://api.hello.is';
 let senseAuthToken = null;
@@ -218,366 +225,346 @@ function chunk(buffer, size) {
 // Store previous payload for comparison
 let previousPayload = null;
 
-// Analyze sensor payload with pattern detection
-function analyzeSensorPayload(payload) {
-    console.log('\nPayload Analysis:');
-    console.log('Current  :', payload.toString('hex'));
-    
-    if (previousPayload) {
-        console.log('Previous :', previousPayload.toString('hex'));
-        
-        // Compare bytes
-        console.log('\nByte changes:');
-        const changes = [];
-        for (let i = 0; i < payload.length; i++) {
-            if (payload[i] !== previousPayload[i]) {
-                changes.push({
-                    position: i,
-                    previous: previousPayload[i],
-                    current: payload[i],
-                    diff: payload[i] - previousPayload[i]
-                });
+// Store sensor data with timestamp
+async function storeSensorData(sensorData) {
+    try {
+        // Store latest data
+        await storage.setItem('latest_sensor_data', sensorData);
+
+        // Store historical data
+        const timestamp = moment().format();
+        const history = await storage.getItem('sensor_history') || {};
+
+        // Initialize history for each sensor if not exists
+        Object.keys(sensorData).forEach(sensor => {
+            if (!history[sensor]) {
+                history[sensor] = {};
             }
-        }
-        console.log('Changed bytes:', changes);
-        
-        // Look for patterns in changes
-        if (changes.length > 0) {
-            // Group changes by their difference
-            const diffGroups = changes.reduce((acc, change) => {
-                const diff = change.diff;
-                if (!acc[diff]) acc[diff] = [];
-                acc[diff].push(change.position);
-                return acc;
-            }, {});
-            console.log('\nChanges grouped by difference:', diffGroups);
-            
-            // Look for regular intervals
-            console.log('\nPosition intervals:');
-            changes.forEach((change, i) => {
-                if (i > 0) {
-                    const interval = change.position - changes[i-1].position;
-                    console.log(`Interval between positions ${changes[i-1].position} and ${change.position}: ${interval} bytes`);
-                }
-            });
-        }
+            history[sensor][timestamp] = sensorData[sensor];
+        });
+
+        // Keep only last 7 days of data
+        const cutoff = moment().subtract(7, 'days');
+        Object.keys(history).forEach(sensor => {
+            history[sensor] = Object.fromEntries(
+                Object.entries(history[sensor]).filter(([time]) => 
+                    moment(time).isAfter(cutoff)
+                )
+            );
+        });
+
+        await storage.setItem('sensor_history', history);
+    } catch (error) {
+        console.error('Error storing sensor data:', error);
     }
-    
-    // Store for next comparison
-    previousPayload = Buffer.from(payload);
-    
-    // Look for potential sensor values
-    const potentialSensors = [];
-    for (let i = 0; i < payload.length - 3; i++) {
-        // Try different byte combinations
-        const value1 = payload[i];
-        const value2 = (payload[i] << 8) | payload[i + 1];
-        const value4 = (payload[i] << 24) | (payload[i + 1] << 16) | (payload[i + 2] << 8) | payload[i + 3];
-        
-        // Check if values are in typical sensor ranges
-        if (value1 >= 0 && value1 <= 100) {
-            potentialSensors.push({ start: i, length: 1, value: value1, type: 'percentage' });
-        }
-        if (value2 >= 0 && value2 <= 10000) { // For scaled values (e.g. temp * 100)
-            const scaledValue = value2 / 100;
-            if (scaledValue >= -20 && scaledValue <= 50) { // Temperature range
-                potentialSensors.push({ start: i, length: 2, value: scaledValue, type: 'temperature' });
-            }
+}
+
+// Extract sensor data from decrypted payload
+function extractSensorData(decryptedPayload) {
+    const sensorData = {};
+
+    for (const [sensorType, config] of Object.entries(SENSOR_MAPPINGS)) {
+        const readings = config.positions.map(([start, length]) => {
+            const bytes = decryptedPayload.slice(start, start + length);
+            return config.transform(bytes);
+        });
+
+        if (readings.some(reading => reading !== null)) {
+            const validReading = readings.find(reading => reading !== null);
+            sensorData[sensorType] = validReading.value;
         }
     }
 
-    // Group potential sensors by position
-    const sensorsByPosition = potentialSensors.reduce((acc, sensor) => {
-        const key = `${sensor.start}-${sensor.length}`;
-        if (!acc[key]) acc[key] = [];
-        acc[key].push(sensor);
-        return acc;
-    }, {});
-
-    console.log('\nPotential sensors by position:', sensorsByPosition);
-    
-    // Look for consistent patterns
-    const patterns = [];
-    for (let i = 0; i < payload.length - 1; i++) {
-        const byte = payload[i];
-        const nextByte = payload[i + 1];
-        
-        // Look for specific patterns
-        if (byte <= 100 && nextByte <= 100) {
-            patterns.push({
-                position: i,
-                type: 'consecutive_percentage',
-                values: [byte, nextByte]
-            });
-        }
-    }
-    
-    console.log('\nByte patterns:', patterns);
+    console.log('Extracted sensor data:', sensorData);
+    return sensorData;
 }
 
 // Encryption constants and utilities
 const DEFAULT_AES_KEY = Buffer.from('1234567891234567'); // 16-byte key
-const MODES = ['aes-128-ecb', 'aes-128-cbc', 'aes-128-ctr'];
+const MODES = ['aes-128-ecb', 'aes-128-cbc'];
+const DEVICE_KEY_PREFIX = 'sense_';  // Used in key generation
 
 function generateDeviceKey(deviceId) {
-    // Use device ID to generate a device-specific key
+    if (!deviceId) return DEFAULT_AES_KEY;
+    
+    // Use device ID with prefix to generate a device-specific key
     const hash = crypto.createHash('md5');
-    hash.update(deviceId);
+    hash.update(DEVICE_KEY_PREFIX + deviceId);
     return hash.digest();
 }
 
 function decryptPayload(encryptedData, deviceId) {
+    if (!encryptedData || encryptedData.length === 0) {
+        console.error('Empty encrypted data');
+        return null;
+    }
+
     const deviceKey = generateDeviceKey(deviceId);
-    
-    for (const mode of MODES) {
+    console.log('Device Key:', deviceKey.toString('hex'));
+    console.log('Encrypted Data:', encryptedData.toString('hex'));
+
+    // First try ECB mode with device key
+    try {
+        const decipher = crypto.createDecipheriv('aes-128-ecb', deviceKey, null);
+        let decrypted = decipher.update(encryptedData);
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
+        
+        if (isValidSensorData(decrypted)) {
+            console.log('Successfully decrypted with ECB mode and device key');
+            return decrypted;
+        }
+    } catch (error) {
+        console.log('ECB decryption with device key failed:', error.message);
+    }
+
+    // Try ECB mode with default key
+    try {
+        const decipher = crypto.createDecipheriv('aes-128-ecb', DEFAULT_AES_KEY, null);
+        let decrypted = decipher.update(encryptedData);
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
+        
+        if (isValidSensorData(decrypted)) {
+            console.log('Successfully decrypted with ECB mode and default key');
+            return decrypted;
+        }
+    } catch (error) {
+        console.log('ECB decryption with default key failed:', error.message);
+    }
+
+    // Try CBC mode as last resort
+    if (encryptedData.length >= 16) {
         try {
-            // For modes that need IV, use first 16 bytes of encrypted data
-            const needsIV = mode !== 'aes-128-ecb';
-            const iv = needsIV ? encryptedData.slice(0, 16) : null;
-            const data = needsIV ? encryptedData.slice(16) : encryptedData;
+            const iv = encryptedData.slice(0, 16);
+            const data = encryptedData.slice(16);
             
-            // Try with both default and device-specific keys
-            const keys = [DEFAULT_AES_KEY, deviceKey];
-            
-            for (const key of keys) {
-                try {
-                    const decipher = crypto.createDecipheriv(mode, key, iv);
-                    let decrypted = decipher.update(data);
-                    decrypted = Buffer.concat([decrypted, decipher.final()]);
-                    
-                    // Check if decrypted data looks valid (contains some values between 0-100)
-                    const hasValidRanges = decrypted.some(b => b >= 0 && b <= 100);
-                    if (hasValidRanges) {
-                        console.log(`Successfully decrypted with mode: ${mode}, key type: ${key === DEFAULT_AES_KEY ? 'default' : 'device'}`);
-                        return decrypted;
-                    }
-                } catch (error) {
-                    // Continue trying other combinations
+            // Try with device key
+            try {
+                const decipher = crypto.createDecipheriv('aes-128-cbc', deviceKey, iv);
+                let decrypted = decipher.update(data);
+                decrypted = Buffer.concat([decrypted, decipher.final()]);
+                
+                if (isValidSensorData(decrypted)) {
+                    console.log('Successfully decrypted with CBC mode and device key');
+                    return decrypted;
                 }
+            } catch (error) {
+                console.log('CBC decryption with device key failed:', error.message);
+            }
+
+            // Try with default key
+            try {
+                const decipher = crypto.createDecipheriv('aes-128-cbc', DEFAULT_AES_KEY, iv);
+                let decrypted = decipher.update(data);
+                decrypted = Buffer.concat([decrypted, decipher.final()]);
+                
+                if (isValidSensorData(decrypted)) {
+                    console.log('Successfully decrypted with CBC mode and default key');
+                    return decrypted;
+                }
+            } catch (error) {
+                console.log('CBC decryption with default key failed:', error.message);
             }
         } catch (error) {
-            console.error(`Decryption failed for mode ${mode}:`, error.message);
+            console.log('CBC decryption failed:', error.message);
         }
     }
-    
+
     console.error('All decryption attempts failed');
-    return encryptedData; // Return original data if all decryption attempts fail
+    return null;
+}
+
+function isValidSensorData(data) {
+    if (!data || data.length < 12) return false;
+    
+    try {
+        // Check for valid temperature range (-50 to 100°C)
+        const temp = (data[1] << 8) | data[0];
+        const tempValue = (temp / 100) - 50;
+        if (tempValue < -50 || tempValue > 100) return false;
+        
+        // Check for valid humidity range (0-100%)
+        const humidity = (data[3] << 8) | data[2];
+        const humidityValue = humidity / 100;
+        if (humidityValue < 0 || humidityValue > 100) return false;
+        
+        // Check for valid light range (0-65535)
+        const light = (data[5] << 8) | data[4];
+        if (light > 65535) return false;
+        
+        // Check for valid sound range (0-100 dB)
+        const sound = (data[7] << 8) | data[6];
+        const soundValue = sound / 100;
+        if (soundValue < 0 || soundValue > 100) return false;
+        
+        // Check for valid air quality range (0-500)
+        const airQuality = (data[9] << 8) | data[8];
+        const aqValue = airQuality / 100;
+        if (aqValue < 0 || aqValue > 500) return false;
+        
+        // Check for valid particulates range (0-1000 μg/m³)
+        const particulates = (data[11] << 8) | data[10];
+        const pmValue = particulates / 10;
+        if (pmValue < 0 || pmValue > 1000) return false;
+        
+        return true;
+    } catch (error) {
+        console.error('Error validating sensor data:', error);
+        return false;
+    }
 }
 
 // Sensor data extraction
 const SENSOR_MAPPINGS = {
     temperature: {
-        positions: [[36, 2], [43, 2]],
+        positions: [[0, 2]],
         transform(bytes) {
-            return parseFloat((bytes[0] + bytes[1] / 256).toFixed(2));
+            const rawValue = (bytes[1] << 8) | bytes[0];
+            const calibratedValue = rawValue / 100 - 50;
+            return {
+                raw_value: rawValue,
+                calibrated_value: parseFloat(calibratedValue.toFixed(1)),
+                unit: "CELSIUS",
+                condition: getTemperatureCondition(calibratedValue),
+                status: calibratedValue >= -50 && calibratedValue <= 100 ? 1 : 0
+            };
         }
     },
     humidity: {
-        positions: [[2, 1], [19, 1], [37, 1]],
+        positions: [[2, 2]],
         transform(bytes) {
-            return parseFloat((bytes[0]).toFixed(2));
+            const rawValue = (bytes[1] << 8) | bytes[0];
+            const calibratedValue = rawValue / 100;
+            return {
+                raw_value: rawValue,
+                calibrated_value: parseFloat(calibratedValue.toFixed(1)),
+                unit: "PERCENTAGE",
+                condition: getHumidityCondition(calibratedValue),
+                status: calibratedValue >= 0 && calibratedValue <= 100 ? 1 : 0
+            };
         }
     },
     light: {
-        positions: [[27, 1], [28, 1]],
+        positions: [[4, 2]],
         transform(bytes) {
-            // Convert raw values to lux (0-100 scale)
-            const rawValue = bytes[0] + (bytes[1] << 8);
-            return parseFloat((rawValue / 65535 * 100).toFixed(2));
+            const rawValue = (bytes[1] << 8) | bytes[0];
+            const calibratedValue = rawValue / 100;
+            return {
+                raw_value: rawValue,
+                calibrated_value: parseFloat(calibratedValue.toFixed(1)),
+                unit: "LUX",
+                condition: getLightCondition(calibratedValue),
+                status: rawValue <= 65535 ? 1 : 0
+            };
+        }
+    },
+    sound: {
+        positions: [[6, 2]],
+        transform(bytes) {
+            const rawValue = (bytes[1] << 8) | bytes[0];
+            const calibratedValue = rawValue / 100;
+            return {
+                raw_value: rawValue,
+                calibrated_value: parseFloat(calibratedValue.toFixed(1)),
+                unit: "DECIBEL",
+                condition: getSoundCondition(calibratedValue),
+                status: calibratedValue >= 0 && calibratedValue <= 100 ? 1 : 0
+            };
         }
     },
     airQuality: {
-        positions: [[3, 1], [4, 1]],
+        positions: [[8, 2]],
         transform(bytes) {
-            return parseFloat(((bytes[0] + bytes[1]) / 2).toFixed(2));
+            const rawValue = (bytes[1] << 8) | bytes[0];
+            const calibratedValue = rawValue / 100;
+            return {
+                raw_value: rawValue,
+                calibrated_value: parseFloat(calibratedValue.toFixed(1)),
+                unit: "VOC",
+                condition: getAirQualityCondition(calibratedValue),
+                status: calibratedValue >= 0 && calibratedValue <= 500 ? 1 : 0
+            };
         }
     },
     particulates: {
-        positions: [[10, 1], [11, 1], [12, 1]],
+        positions: [[10, 2]],
         transform(bytes) {
-            // Convert raw values to PM2.5 (μg/m³)
-            const values = bytes.filter(b => b !== null && b !== undefined);
-            if (values.length === 0) return null;
-            
-            // Calculate PM2.5 value (typical range 0-500 μg/m³)
-            const rawValue = values.reduce((sum, val) => sum + val, 0) / values.length;
-            return parseFloat((rawValue * 2).toFixed(2)); // Scale to typical PM2.5 range
+            const rawValue = (bytes[1] << 8) | bytes[0];
+            const calibratedValue = rawValue / 10;
+            return {
+                raw_value: rawValue,
+                calibrated_value: parseFloat(calibratedValue.toFixed(1)),
+                unit: "UG_M3",
+                condition: getParticulatesCondition(calibratedValue),
+                status: calibratedValue >= 0 && calibratedValue <= 1000 ? 1 : 0
+            };
         }
     }
 };
 
-function extractSensorData(decryptedPayload) {
-    try {
-        const sensorData = {};
-        
-        // Extract values for each sensor type
-        for (const [sensorType, config] of Object.entries(SENSOR_MAPPINGS)) {
-            const values = config.positions.map(([pos, len]) => {
-                if (pos >= decryptedPayload.length) return null;
-                const bytes = decryptedPayload.slice(pos, pos + len);
-                return bytes.length === len ? bytes : null;
-            }).filter(Boolean);
-
-            if (values.length > 0) {
-                const transformedValues = values.map(bytes => config.transform(bytes));
-                // Use the first valid value
-                sensorData[sensorType] = transformedValues.find(v => v !== null) ?? null;
-            } else {
-                sensorData[sensorType] = null;
-            }
-        }
-
-        console.log('Extracted sensor values:', JSON.stringify(sensorData, null, 2));
-        return sensorData;
-    } catch (error) {
-        console.error('Error extracting sensor data:', error);
-        return {
-            temperature: null,
-            humidity: null,
-            light: null,
-            airQuality: null,
-            particulates: null
-        };
-    }
+// Sensor condition helpers
+function getTemperatureCondition(value) {
+    if (value < 16) return "TOO_COLD";
+    if (value > 25) return "TOO_HOT";
+    return "IDEAL";
 }
 
-function average(arr) {
-    if (!Array.isArray(arr) || arr.length === 0) return null;
-    const validValues = arr.filter(v => !isNaN(v) && v !== null);
-    return validValues.length > 0 ? 
-        parseFloat((validValues.reduce((a, b) => a + b) / validValues.length).toFixed(2)) : 
-        null;
+function getHumidityCondition(value) {
+    if (value < 30) return "TOO_DRY";
+    if (value > 60) return "TOO_HUMID";
+    return "IDEAL";
 }
 
-// Timestamp handling
-function decodeTimestamp(timestamp) {
-    try {
-        // Convert BigInt to Number safely for dates
-        const milliseconds = typeof timestamp === 'bigint' ? 
-            Number(timestamp) : Number(timestamp.toString());
-        
-        if (isNaN(milliseconds)) {
-            console.error('Invalid timestamp value:', timestamp);
-            return null;
-        }
-        
-        const date = new Date(milliseconds);
-        return date.toString() === 'Invalid Date' ? null : date;
-    } catch (error) {
-        console.error('Error decoding timestamp:', error);
-        return null;
-    }
+function getLightCondition(value) {
+    if (value < 20) return "TOO_DARK";
+    if (value > 80) return "TOO_BRIGHT";
+    return "IDEAL";
 }
 
-function encodeTimestamp() {
-    // Current time in milliseconds as string to avoid BigInt serialization issues
-    return Date.now().toString();
+function getSoundCondition(value) {
+    if (value > 60) return "TOO_LOUD";
+    return "IDEAL";
 }
 
-// Manual protobuf decoding
-function decodeProtobuf(buffer) {
-    try {
-        let offset = 0;
-        let result = {
-            version: null,
-            timestamp: null,
-            timestampDate: null,
-            payload: null,
-            sensors: null
-        };
+function getAirQualityCondition(value) {
+    if (value > 60) return "POOR";
+    if (value > 30) return "FAIR";
+    return "GOOD";
+}
 
-        // Version field (1) - varint
-        if (buffer[offset] === 0x08) {
-            offset += 1;
-            result.version = buffer[offset];
-            offset += 1;
-        }
-
-        // Timestamp field (2) - varint
-        if (buffer[offset] === 0x10) {
-            offset += 1;
-            let timestamp = 0n;
-            let shift = 0n;
-            while (offset < buffer.length) {
-                const byte = buffer[offset];
-                timestamp |= BigInt(byte & 0x7f) << shift;
-                offset += 1;
-                if ((byte & 0x80) === 0) break;
-                shift += 7n;
-            }
-            // Convert BigInt to string for safe serialization
-            result.timestamp = timestamp.toString();
-            result.timestampDate = decodeTimestamp(timestamp);
-        }
-
-        // Remaining data is the payload
-        if (offset < buffer.length) {
-            result.payload = buffer.slice(offset).toString('hex');
-            
-            // Try to decrypt the payload
-            const deviceId = global.currentDeviceId;
-            if (deviceId) {
-                const decryptedPayload = decryptPayload(buffer.slice(offset), deviceId);
-                if (decryptedPayload) {
-                    console.log('Decrypted payload:', decryptedPayload);
-                    
-                    // Extract sensor values
-                    const sensorData = extractSensorData(decryptedPayload);
-                    if (sensorData) {
-                        result.sensors = sensorData;
-                    }
-                }
-            }
-        }
-
-        return result;
-    } catch (error) {
-        console.error('Error decoding protobuf:', error);
-        return null;
-    }
+function getParticulatesCondition(value) {
+    if (value > 50) return "POOR";
+    if (value > 25) return "FAIR";
+    return "GOOD";
 }
 
 app.post('/', async (req, res) => {
     console.log('----------------------------------------');
     console.log('POST Request Headers:', req.headers);
-    
-    // Store device ID for decryption
-    global.currentDeviceId = req.headers['x-hello-sense-id'];
-    
-    try {
-        if (req.headers['content-type'] === 'application/x-protobuf' && req.rawBody) {
-            const decoded = decodeProtobuf(req.rawBody);
-            console.log('Decoded message:', {
-                version: decoded.version,
-                timestamp: decoded.timestamp,
-                timestampDate: decoded.timestampDate,
-                payload: decoded.payload
-            });
+    console.log('Device ID:', req.headers['x-hello-sense-id']);
 
-            // Analyze payload to find sensor data format
-            analyzeSensorPayload(Buffer.from(decoded.payload, 'hex'));
-            
-            // Store the latest data
-            const latestData = {
-                timestamp: Date.now(),
-                data: decoded,
-                headers: req.headers,
-                device_id: req.headers['x-hello-sense-id']
-            };
-            
-            await storage.setItem('latest_sensor_data', latestData);
-            
-            res.status(200).send({
-                server_time: encodeTimestamp()
-            });
-        } else {
-            console.log('Not a protobuf request');
-            res.status(400).send('Invalid content type');
+    try {
+        const rawBody = await getRawBody(req);
+        const deviceId = req.headers['x-hello-sense-id'];
+        
+        // Decrypt and validate payload
+        const decryptedPayload = await decryptPayload(rawBody, deviceId);
+        if (!decryptedPayload) {
+            return res.status(400).send('Invalid payload');
         }
+
+        // Extract sensor data
+        const sensorData = extractSensorData(decryptedPayload);
+        if (!sensorData) {
+            return res.status(400).send('Invalid sensor data');
+        }
+
+        // Store sensor data
+        await storeSensorData(sensorData);
+
+        res.status(200).send('OK');
     } catch (error) {
-        console.error('Error details:', error);
-        console.error('Error stack:', error.stack);
-        res.status(500).send('Internal Server Error');
+        console.error('Error processing request:', error);
+        res.status(500).send('Internal server error');
     }
 });
 
@@ -590,25 +577,29 @@ app.get('/v2/timeline/current', async (req, res) => {
             return;
         }
 
+        // Get the actual sensor values
+        const sensorValues = latestData.data.sensors || {};
+        
         // Format response according to Sense API format
         const response = {
             "status": {
                 "sensor_id": latestData.device_id,
-                "temp": 25.5,
-                "humidity": 45,
-                "particulates": 50,
-                "light": 5,
-                "sound": 35,
-                "wave": 0,
-                "timestamp": parseInt(latestData.data.timestamp)
+                "temp": sensorValues.temperature ? sensorValues.temperature.calibrated_value : 0,
+                "humidity": sensorValues.humidity ? sensorValues.humidity.calibrated_value : 0,
+                "particulates": sensorValues.particulates ? sensorValues.particulates.calibrated_value : 0,
+                "light": sensorValues.light ? sensorValues.light.calibrated_value : 0,
+                "sound": 0,  // Sound sensor not implemented yet
+                "air_quality": sensorValues.airQuality ? sensorValues.airQuality.calibrated_value : 0
             },
-            "message": "OK"
+            "last_updated": latestData.timestamp,
+            "device_id": latestData.device_id
         };
 
+        console.log('Sending sensor data:', JSON.stringify(response, null, 2));
         res.json(response);
     } catch (error) {
-        console.error('Error getting timeline data:', error);
-        res.status(500).json({ error: 'Failed to get timeline data' });
+        console.error('Error retrieving sensor data:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
@@ -620,26 +611,32 @@ app.get('/v2/room/current', async (req, res) => {
             return;
         }
 
+        // Get the actual sensor values
+        const sensorValues = latestData.data.sensors || {};
+        
         // Format response according to Sense API format
         const response = {
             "room": {
-                "temperature": 25.5,
-                "humidity": 45,
-                "particulates": 50,
-                "light": 5,
-                "sound": 35,
-                "light_peak": 10,
-                "sound_peak": 50,
-                "light_peaktime": Date.now() - 300000, // 5 minutes ago
-                "sound_peaktime": Date.now() - 300000
+                "temperature": sensorValues.temperature ? sensorValues.temperature.calibrated_value : 0,
+                "humidity": sensorValues.humidity ? sensorValues.humidity.calibrated_value : 0,
+                "particulates": sensorValues.particulates ? sensorValues.particulates.calibrated_value : 0,
+                "light": sensorValues.light ? sensorValues.light.calibrated_value : 0,
+                "sound": 0,  // Sound sensor not implemented yet
+                "light_peak": sensorValues.light ? sensorValues.light.calibrated_value : 0,
+                "sound_peak": 0,
+                "light_perc": sensorValues.light ? sensorValues.light.calibrated_value : 0,
+                "sound_perc": 0,
+                "air_quality": sensorValues.airQuality ? sensorValues.airQuality.calibrated_value : 0
             },
-            "message": "OK"
+            "last_updated": latestData.timestamp,
+            "device_id": latestData.device_id
         };
 
+        console.log('Sending room data:', JSON.stringify(response, null, 2));
         res.json(response);
     } catch (error) {
-        console.error('Error getting room data:', error);
-        res.status(500).json({ error: 'Failed to get room data' });
+        console.error('Error retrieving room data:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
